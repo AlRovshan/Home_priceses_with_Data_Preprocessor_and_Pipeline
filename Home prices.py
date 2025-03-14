@@ -7,7 +7,7 @@ from sklearn.pipeline import Pipeline
 from sklearn import linear_model
 from typing import Optional, List
 from sklearn.metrics import make_scorer
-from sklearn.model_selection import GridSearchCV, KFold
+from sklearn.model_selection import RandomizedSearchCV, GridSearchCV, KFold
 from sklearn.metrics import mean_squared_error
 
 data = pd.read_csv('train.csv')
@@ -17,17 +17,88 @@ test = pd.read_csv('test.csv')
 numerical_columns = [key for key in data.keys() if data[key].dtype in ("int64", "float64")]
 numerical_columns.remove('SalePrice')
 
-# Filling missing values
-def fillnan(data, col):
-    for i in col:
-        data[i].fillna(data[i].median(), inplace=True)
-fillnan(data, numerical_columns)
-fillnan(test, numerical_columns)
-cotegorical_columns = [key for key in data.keys() if data[key].dtype == "object"]
-nan_todrop = data.columns[data.isna().any()].tolist()
-cotegorical_columns = [col for col in cotegorical_columns if col not in nan_todrop]
 
-# Генерация новых признаков
+# Filling missing values
+class CustomImputer(BaseEstimator, TransformerMixin):
+    def __init__(self):
+        self.fill_with_zero = ['TotalBsmtSF', 'BsmtFinSF1', 'BsmtFinSF2',
+                               'BsmtUnfSF', 'BsmtFullBath', 'BsmtHalfBath',
+                               'GarageArea', 'GarageCars', 'MasVnrArea']
+        self.fill_with_na = ['Alley', 'BsmtQual', 'BsmtCond', 'BsmtExposure',
+                             'BsmtFinType1', 'BsmtFinType2', 'FireplaceQu',
+                             'GarageType', 'GarageQual', 'GarageCond', 'GarageFinish',
+                             'PoolQC', 'Fence', 'MiscFeature']
+        self.fill_with_specific = {
+            'Electrical': 'SBrkr',  # Standard Circuit Breakers
+            'MSZoning': 'RL',  # Residential Low Density
+            'Utilities': 'AllPub',  # All public utilities
+            'KitchenQual': 'TA',  # Typical/Average
+            'Functional': 'Typ',  # Typical
+            'MasVnrType': 'None',  # No masonry veneer
+            'SaleType': 'WD'  # Warranty Deed - Conventional
+        }
+
+        # Will store computed values during fit - trailing underscore by convention
+        self.mode_values_ = {}
+        self.neighborhood_medians_ = None
+
+    def fit(self, X, y=None):
+        # Compute mode for mode columns
+        for col in ['Exterior1st', 'Exterior2nd']:
+            self.mode_values_[col] = X[col].mode()[0]
+
+        # Compute neighborhood medians for LotFrontage
+        self.neighborhood_medians_ = X.groupby('Neighborhood')['LotFrontage'].median()
+
+        return self
+
+    def transform(self, X):
+        X = X.copy()
+
+        # Fill zeros
+        X[self.fill_with_zero] = X[self.fill_with_zero].fillna(0)
+
+        # Fill NA strings
+        X[self.fill_with_na] = X[self.fill_with_na].fillna('NA')
+
+        # Fill with specific values
+        for col, value in self.fill_with_specific.items():
+            X[col] = X[col].fillna(value)
+
+        # Fill with computed modes
+        for col in self.mode_values_:
+            X[col] = X[col].fillna(self.mode_values_[col])
+
+        # Fill LotFrontage using neighborhood medians
+        for idx in X.index:
+            if pd.isna(X.loc[idx, 'LotFrontage']):
+                neighborhood = X.loc[idx, 'Neighborhood']
+                X.loc[idx, 'LotFrontage'] = self.neighborhood_medians_[neighborhood]
+
+        # Fill GarageYrBlt using YearBuilt (if available, otherwise 0)
+        for idx in X.index:
+            if pd.isna(X.loc[idx, 'GarageYrBlt']):
+                if X.loc[idx, 'YearBuilt']:
+                    year_built = X.loc[idx, 'YearBuilt']
+                    X.loc[idx, 'GarageYrBlt'] = year_built
+                else:
+                    X.loc[idx, 'GarageYrBlt'] = 0
+
+        return X
+
+
+imputation_pipe = Pipeline([
+    ('custom_imputer', CustomImputer())
+])
+data = imputation_pipe.fit_transform(data)
+test = imputation_pipe.fit_transform(test)
+
+# Selection of categorical and numerical features
+numerical_columns = [key for key in data.keys() if data[key].dtype in ("int64", "float64")]
+numerical_columns.remove('SalePrice')
+cotegorical_columns = [key for key in data.keys() if data[key].dtype == "object"]
+
+# Create new features
 def feat_gen(data):
     data['HouseAge'] = data['YrSold'] - data['YearBuilt']
     data['SinceRemodel'] = data['YrSold'] - data['YearRemodAdd']
@@ -128,22 +199,23 @@ pipeline = make_ultimate_pipeline()
 pipeline.fit(data, data['SalePrice'])
 
 # Searching for the best model using GridSearchCV
-rmsle_scorer = make_scorer(mean_squared_error, greater_is_better=False)
+mse_scorer = make_scorer(mean_squared_error, greater_is_better=False)
 kf = KFold(n_splits=5, shuffle=True, random_state=24)
-grid = GridSearchCV(pipeline,
-                    param_grid = {'regressor__alpha':np.logspace(-3, 3, num=7, base=10.)} ,
-                    scoring = rmsle_scorer,
-                    cv=kf
-                    )
-grid.fit(data, data['SalePrice'])
-predictions = grid.predict(test)
+
+param = {
+    'regressor__iterations': [10000],
+    'regressor__l2_leaf_reg': np.logspace(-3, 1, num=5, base=10.)
+}
+grid_search = GridSearchCV(
+    pipeline,
+    param_grid=param,
+    scoring=mse_scorer,
+    cv=kf
+)
+grid_search.fit(data, data['SalePrice'])
+predictions = grid_search.predict(test)
 
 #Output of results
 test['SalePrice'] = predictions
 submit = test[['Id', 'SalePrice']]
 submit.to_csv('submit.csv', index=False)
-
-
-
-
-
