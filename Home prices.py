@@ -196,7 +196,6 @@ def make_ultimate_pipeline():
     return pipeline
 
 pipeline = make_ultimate_pipeline()
-pipeline.fit(data, data['SalePrice'])
 
 # Searching for the best model using GridSearchCV
 mse_scorer = make_scorer(mean_squared_error, greater_is_better=False)
